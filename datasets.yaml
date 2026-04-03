@@ -1,0 +1,7 @@
+# Shinryū dataset configuration
+# Each dataset is an NDJSON file ingested into the Bronze tier.
+# Use `shinryu-mcp --ingest --datasets-config datasets.yaml` to load.
+
+datasets:
+  - name: cerebras-scalability
+    data_file: datasets/cerebras-scalability.json

@@ -1,0 +1,34 @@
+[package]
+name = "shinryu-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+license = "MIT"
+description = "Shinryū analytical query plane — DataFusion MCP server for cross-signal SQL analysis"
+
+[dependencies]
+datafusion = "45"
+object_store = "0.12"
+arrow = { version = "54", features = ["json"] }
+parquet = "54"
+kaname = { git = "https://github.com/pleme-io/kaname" }
+shikumi = { git = "https://github.com/pleme-io/shikumi" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+notify = "7"
+
+[lints.clippy]
+pedantic = "warn"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

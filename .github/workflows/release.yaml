@@ -1,0 +1,48 @@
+name: Build and push container image
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: pleme-io/shinryu-mcp
+
+jobs:
+  build:
+    runs-on: ubuntu-latest-arm64
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install musl tools
+        run: sudo apt-get install -y musl-tools
+
+      - name: Build static binary
+        run: cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        run: |
+          # Create minimal Dockerfile in memory (scratch + static binary)
+          cat <<'DOCKERFILE' > Dockerfile
+          FROM scratch
+          COPY target/aarch64-unknown-linux-musl/release/shinryu-mcp /shinryu-mcp
+          ENTRYPOINT ["/shinryu-mcp"]
+          DOCKERFILE
+          docker build -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} .
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}

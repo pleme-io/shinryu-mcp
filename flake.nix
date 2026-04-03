@@ -1,16 +1,26 @@
 {
   description = "Shinryū analytical query plane — DataFusion MCP server for cross-signal SQL analysis";
 
-  nixConfig = {
-    allow-import-from-derivation = true;
-  };
-
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
-    crate2nix.url = "github:nix-community/crate2nix";
-    flake-utils.url = "github:numtide/flake-utils";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     substrate = {
       url = "github:pleme-io/substrate";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.fenix.follows = "fenix";
+    };
+    forge = {
+      url = "github:pleme-io/forge";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.fenix.follows = "fenix";
+      inputs.substrate.follows = "substrate";
+      inputs.crate2nix.follows = "crate2nix";
+    };
+    crate2nix = {
+      url = "github:nix-community/crate2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     devenv = {
@@ -19,24 +29,29 @@
     };
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    crate2nix,
-    flake-utils,
-    substrate,
-    devenv,
-  }:
-    (import "${substrate}/lib/rust-tool-release-flake.nix" {
-      inherit nixpkgs crate2nix flake-utils devenv;
+  outputs = { self, nixpkgs, substrate, forge, crate2nix, devenv, ... }:
+    (import "${substrate}/lib/rust-service-flake.nix" {
+      inherit nixpkgs substrate forge crate2nix devenv;
     }) {
-      toolName = "shinryu-mcp";
-      src = self;
-      repo = "pleme-io/shinryu-mcp";
+      inherit self;
+      serviceName = "shinryu-mcp";
+      registry = "ghcr.io/pleme-io/shinryu-mcp";
+      packageName = "shinryu-mcp";
+      namespace = "observability";
+      architectures = [ "arm64" ];
+      serviceType = "rest";
+      ports = {
+        http = 8080;
+        health = 8081;
+        metrics = 9090;
+      };
       crateOverrides = {
         rmcp = attrs: {
           CARGO_CRATE_NAME = "rmcp";
         };
       };
+      # No HM module or NixOS module for this service
+      moduleDir = null;
+      nixosModuleFile = null;
     };
 }

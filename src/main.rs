@@ -163,19 +163,16 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // MCP server mode (default)
-    // TODO: Wire kaname MCP server with tool registration
-    // For now, print usage
-    println!("shinryu-mcp — Shinryū analytical query plane");
-    println!();
-    println!("Usage:");
-    println!("  shinryu-mcp --sql 'SELECT count(*) FROM events'");
-    println!("  shinryu-mcp --experiment exp-001 --analysis timeline");
-    println!("  shinryu-mcp --experiment exp-001 --analysis bottleneck");
-    println!("  shinryu-mcp --experiment exp-001 --analysis compare --compare-with exp-002");
-    println!("  shinryu-mcp --experiment exp-001 --analysis network");
-    println!();
-    println!("MCP server mode: coming soon (kaname integration)");
+    // Daemon mode (default) — keep refiner/materializer running
+    // MCP server will be added here when kaname integration is ready
+    tracing::info!("shinryu-mcp running in daemon mode (refiner + materializer)");
+    tracing::info!("Bronze: {bronze_path}");
+    tracing::info!("Silver: {silver_path}");
+    tracing::info!("Gold: {gold_path}");
+
+    // Block until shutdown signal — refiner and materializer run as spawned tasks
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("Shutting down");
 
     Ok(())
 }

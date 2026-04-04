@@ -63,6 +63,11 @@ struct Cli {
     /// Result limit
     #[arg(long, default_value = "500")]
     limit: u32,
+
+    /// Daemon mode: run refiner/materializer + health endpoint without MCP server.
+    /// Use for K8s Deployments where no stdio MCP client is attached.
+    #[arg(long)]
+    daemon: bool,
 }
 
 #[tokio::main]
@@ -167,8 +172,6 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // MCP server mode (default) — run MCP server + health endpoint + background tasks
-    tracing::info!("shinryu-mcp starting MCP server");
     tracing::info!("Bronze: {bronze_path}");
     tracing::info!("Silver: {silver_path}");
     tracing::info!("Gold: {gold_path}");
@@ -176,8 +179,17 @@ async fn main() -> anyhow::Result<()> {
     // Health endpoint for K8s probes (port 8081)
     tokio::spawn(async { health::serve(8081).await });
 
-    // MCP server on stdio (blocks until client disconnects or signal)
-    mcp::run(Arc::new(ctx)).await?;
+    if cli.daemon {
+        // Daemon mode: refiner/materializer + health, no MCP server.
+        // For K8s Deployments where no stdio client is attached.
+        tracing::info!("shinryu-mcp running in daemon mode");
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Shutting down");
+    } else {
+        // MCP server mode (default): stdio transport for Claude integration.
+        tracing::info!("shinryu-mcp starting MCP server on stdio");
+        mcp::run(Arc::new(ctx)).await?;
+    }
 
     Ok(())
 }

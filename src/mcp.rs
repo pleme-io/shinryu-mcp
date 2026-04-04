@@ -11,9 +11,10 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
-    transport::stdio,
+    transport::{stdio, streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService}},
 };
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::{query, tools, udfs};
 
@@ -180,11 +181,41 @@ impl ServerHandler for ShinryuMcp {
     }
 }
 
-/// Run the MCP server on stdio transport.
+/// Run the MCP server on stdio transport (for local Claude integration).
 pub async fn run(ctx: Arc<SessionContext>) -> anyhow::Result<()> {
     let server = ShinryuMcp::new(ctx).serve(stdio()).await
         .map_err(|e| anyhow::anyhow!("MCP server failed to start: {e}"))?;
     server.waiting().await
         .map_err(|e| anyhow::anyhow!("MCP server error: {e}"))?;
+    Ok(())
+}
+
+/// Run the MCP server on HTTP transport (for K8s daemon mode).
+/// Accepts MCP JSON-RPC over HTTP with SSE streaming responses.
+pub async fn run_http(ctx: Arc<SessionContext>, port: u16) -> anyhow::Result<()> {
+    let ct = CancellationToken::new();
+
+    let service: StreamableHttpService<ShinryuMcp> = StreamableHttpService::new(
+        move || Ok(ShinryuMcp::new(ctx.clone())),
+        Default::default(),
+        StreamableHttpServerConfig {
+            stateful_mode: true,
+            cancellation_token: ct.child_token(),
+            ..Default::default()
+        },
+    );
+
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let addr = format!("0.0.0.0:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await
+        .map_err(|e| anyhow::anyhow!("MCP HTTP server failed to bind to {addr}: {e}"))?;
+
+    tracing::info!("MCP HTTP server listening on {addr}/mcp");
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move { ct.cancelled_owned().await })
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP HTTP server error: {e}"))?;
+
     Ok(())
 }

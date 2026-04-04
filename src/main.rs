@@ -180,13 +180,12 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async { health::serve(8081).await });
 
     if cli.daemon {
-        // Daemon mode: refiner/materializer + health, no MCP server.
-        // For K8s Deployments where no stdio client is attached.
-        tracing::info!("shinryu-mcp running in daemon mode");
-        tokio::signal::ctrl_c().await?;
-        tracing::info!("Shutting down");
+        // Daemon mode: HTTP MCP server on port 9999 + health + refiner/materializer.
+        // For K8s Deployments — Claude connects via HTTP, not stdio.
+        tracing::info!("shinryu-mcp running in daemon mode with HTTP MCP on port 9999");
+        mcp::run_http(Arc::new(ctx), 9999).await?;
     } else {
-        // MCP server mode (default): stdio transport for Claude integration.
+        // Local mode (default): stdio MCP transport for direct Claude integration.
         tracing::info!("shinryu-mcp starting MCP server on stdio");
         mcp::run(Arc::new(ctx)).await?;
     }

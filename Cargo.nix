@@ -1320,6 +1320,20 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "fallback" ];
       };
+      "atomic-waker" = rec {
+        crateName = "atomic-waker";
+        version = "1.1.2";
+        edition = "2018";
+        sha256 = "1h5av1lw56m0jf0fd3bchxq8a30xv0b4wv8s4zkp4s0i7mfvs18m";
+        libName = "atomic_waker";
+        authors = [
+          "Stjepan Glavina <stjepang@gmail.com>"
+          "Contributors to futures-rs"
+        ];
+        features = {
+          "portable-atomic" = [ "dep:portable-atomic" ];
+        };
+      };
       "autocfg" = rec {
         crateName = "autocfg";
         version = "1.5.0";
@@ -4545,7 +4559,7 @@ rec {
           "sink" = [ "futures-sink" ];
           "std" = [ "alloc" "futures-core/std" ];
         };
-        resolvedDefaultFeatures = [ "alloc" "futures-sink" "sink" "std" ];
+        resolvedDefaultFeatures = [ "alloc" "default" "futures-sink" "sink" "std" ];
       };
       "futures-core" = rec {
         crateName = "futures-core";
@@ -5158,6 +5172,92 @@ rec {
         };
         resolvedDefaultFeatures = [ "default" "std" ];
       };
+      "http-body" = rec {
+        crateName = "http-body";
+        version = "1.0.1";
+        edition = "2018";
+        sha256 = "111ir5k2b9ihz5nr9cz7cwm7fnydca7dx4hc7vr16scfzghxrzhy";
+        libName = "http_body";
+        authors = [
+          "Carl Lerche <me@carllerche.com>"
+          "Lucio Franco <luciofranco14@gmail.com>"
+          "Sean McArthur <sean@seanmonstar.com>"
+        ];
+        dependencies = [
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "http";
+            packageId = "http";
+          }
+        ];
+
+      };
+      "http-body-util" = rec {
+        crateName = "http-body-util";
+        version = "0.1.3";
+        edition = "2018";
+        sha256 = "0jm6jv4gxsnlsi1kzdyffjrj8cfr3zninnxpw73mvkxy4qzdj8dh";
+        libName = "http_body_util";
+        authors = [
+          "Carl Lerche <me@carllerche.com>"
+          "Lucio Franco <luciofranco14@gmail.com>"
+          "Sean McArthur <sean@seanmonstar.com>"
+        ];
+        dependencies = [
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "http";
+            packageId = "http";
+          }
+          {
+            name = "http-body";
+            packageId = "http-body";
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+        ];
+        features = {
+          "channel" = [ "dep:tokio" ];
+          "full" = [ "channel" ];
+        };
+        resolvedDefaultFeatures = [ "default" ];
+      };
+      "httparse" = rec {
+        crateName = "httparse";
+        version = "1.10.1";
+        edition = "2018";
+        sha256 = "11ycd554bw2dkgw0q61xsa7a4jn1wb1xbfacmf3dbwsikvkkvgvd";
+        authors = [
+          "Sean McArthur <sean@seanmonstar.com>"
+        ];
+        features = {
+          "default" = [ "std" ];
+        };
+        resolvedDefaultFeatures = [ "default" "std" ];
+      };
+      "httpdate" = rec {
+        crateName = "httpdate";
+        version = "1.0.3";
+        edition = "2021";
+        sha256 = "1aa9rd2sac0zhjqh24c9xvir96g188zldkx0hr6dnnlx5904cfyz";
+        authors = [
+          "Pyfisch <pyfisch@posteo.org>"
+        ];
+
+      };
       "humantime" = rec {
         crateName = "humantime";
         version = "2.3.0";
@@ -5165,6 +5265,172 @@ rec {
         sha256 = "092lpipp32ayz4kyyn4k3vz59j9blng36wprm5by0g2ykqr14nqk";
         features = {
         };
+      };
+      "hyper" = rec {
+        crateName = "hyper";
+        version = "1.9.0";
+        edition = "2021";
+        sha256 = "1jmwbwqcaficskg76kq402gbymbnh2z4v99xwq3l5aa6n8bg16b2";
+        authors = [
+          "Sean McArthur <sean@seanmonstar.com>"
+        ];
+        dependencies = [
+          {
+            name = "atomic-waker";
+            packageId = "atomic-waker";
+            optional = true;
+          }
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "futures-channel";
+            packageId = "futures-channel";
+            optional = true;
+          }
+          {
+            name = "futures-core";
+            packageId = "futures-core";
+            optional = true;
+          }
+          {
+            name = "http";
+            packageId = "http";
+          }
+          {
+            name = "http-body";
+            packageId = "http-body";
+          }
+          {
+            name = "httparse";
+            packageId = "httparse";
+            optional = true;
+          }
+          {
+            name = "httpdate";
+            packageId = "httpdate";
+            optional = true;
+          }
+          {
+            name = "itoa";
+            packageId = "itoa";
+            optional = true;
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+            optional = true;
+          }
+          {
+            name = "smallvec";
+            packageId = "smallvec";
+            optional = true;
+            features = [ "const_generics" "const_new" ];
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "sync" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "futures-channel";
+            packageId = "futures-channel";
+            features = [ "sink" ];
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "fs" "macros" "net" "io-std" "io-util" "rt" "rt-multi-thread" "sync" "time" "test-util" ];
+          }
+        ];
+        features = {
+          "client" = [ "dep:want" "dep:pin-project-lite" "dep:smallvec" ];
+          "ffi" = [ "dep:http-body-util" "dep:futures-util" ];
+          "full" = [ "client" "http1" "http2" "server" ];
+          "http1" = [ "dep:atomic-waker" "dep:futures-channel" "dep:futures-core" "dep:httparse" "dep:itoa" ];
+          "http2" = [ "dep:futures-channel" "dep:futures-core" "dep:h2" ];
+          "server" = [ "dep:httpdate" "dep:pin-project-lite" "dep:smallvec" ];
+          "tracing" = [ "dep:tracing" ];
+        };
+        resolvedDefaultFeatures = [ "default" "http1" "server" ];
+      };
+      "hyper-util" = rec {
+        crateName = "hyper-util";
+        version = "0.1.20";
+        edition = "2021";
+        sha256 = "186zdc58hmm663csmjvrzgkr6jdh93sfmi3q2pxi57gcaqjpqm4n";
+        libName = "hyper_util";
+        authors = [
+          "Sean McArthur <sean@seanmonstar.com>"
+        ];
+        dependencies = [
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "http";
+            packageId = "http";
+          }
+          {
+            name = "http-body";
+            packageId = "http-body";
+          }
+          {
+            name = "hyper";
+            packageId = "hyper";
+          }
+          {
+            name = "pin-project-lite";
+            packageId = "pin-project-lite";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            optional = true;
+            usesDefaultFeatures = false;
+          }
+        ];
+        devDependencies = [
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "hyper";
+            packageId = "hyper";
+            features = [ "full" ];
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" "test-util" "signal" ];
+          }
+        ];
+        features = {
+          "client" = [ "hyper/client" "tokio/net" "dep:tracing" "dep:futures-channel" "dep:tower-service" ];
+          "client-legacy" = [ "client" "dep:socket2" "tokio/sync" "dep:libc" "dep:futures-util" ];
+          "client-pool" = [ "client" "dep:futures-util" "dep:tower-layer" ];
+          "client-proxy" = [ "client" "dep:base64" "dep:ipnet" "dep:percent-encoding" ];
+          "client-proxy-system" = [ "dep:system-configuration" "dep:windows-registry" ];
+          "full" = [ "client" "client-legacy" "client-pool" "client-proxy" "client-proxy-system" "server" "server-auto" "server-graceful" "service" "http1" "http2" "tokio" "tracing" ];
+          "http1" = [ "hyper/http1" ];
+          "http2" = [ "hyper/http2" ];
+          "server" = [ "hyper/server" ];
+          "server-auto" = [ "server" "http1" "http2" ];
+          "server-graceful" = [ "server" "tokio/sync" ];
+          "service" = [ "dep:tower-service" ];
+          "tokio" = [ "dep:tokio" "tokio/rt" "tokio/time" ];
+          "tracing" = [ "dep:tracing" ];
+        };
+        resolvedDefaultFeatures = [ "default" "tokio" ];
       };
       "iana-time-zone" = rec {
         crateName = "iana-time-zone";
@@ -9318,6 +9584,20 @@ rec {
             packageId = "datafusion";
           }
           {
+            name = "http-body-util";
+            packageId = "http-body-util";
+          }
+          {
+            name = "hyper";
+            packageId = "hyper";
+            features = [ "http1" "server" ];
+          }
+          {
+            name = "hyper-util";
+            packageId = "hyper-util";
+            features = [ "tokio" ];
+          }
+          {
             name = "kaname";
             packageId = "kaname";
           }
@@ -9332,6 +9612,15 @@ rec {
           {
             name = "parquet";
             packageId = "parquet";
+          }
+          {
+            name = "rmcp";
+            packageId = "rmcp";
+            features = [ "server" "transport-io" "macros" ];
+          }
+          {
+            name = "schemars";
+            packageId = "schemars";
           }
           {
             name = "serde";
@@ -9482,7 +9771,7 @@ rec {
           "serde" = [ "dep:serde" ];
           "unty" = [ "dep:unty" ];
         };
-        resolvedDefaultFeatures = [ "const_generics" ];
+        resolvedDefaultFeatures = [ "const_generics" "const_new" ];
       };
       "snafu" = rec {
         crateName = "snafu";

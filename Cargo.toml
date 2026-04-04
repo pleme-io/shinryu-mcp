@@ -12,7 +12,12 @@ object_store = "0.12"
 arrow = { version = "54", features = ["json"] }
 parquet = "54"
 kaname = { git = "https://github.com/pleme-io/kaname" }
+rmcp = { version = "0.15", features = ["server", "transport-io", "macros"] }
+schemars = "1"
 shikumi = { git = "https://github.com/pleme-io/shikumi" }
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

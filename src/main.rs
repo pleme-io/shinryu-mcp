@@ -11,13 +11,17 @@
 //! - network: Hubble flow summary
 
 mod compactor;
+mod health;
 mod ingest;
 mod materializer;
+mod mcp;
 mod query;
 mod refiner;
 mod schema;
 mod tools;
 mod udfs;
+
+use std::sync::Arc;
 
 use clap::Parser;
 
@@ -163,16 +167,17 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Daemon mode (default) — keep refiner/materializer running
-    // MCP server will be added here when kaname integration is ready
-    tracing::info!("shinryu-mcp running in daemon mode (refiner + materializer)");
+    // MCP server mode (default) — run MCP server + health endpoint + background tasks
+    tracing::info!("shinryu-mcp starting MCP server");
     tracing::info!("Bronze: {bronze_path}");
     tracing::info!("Silver: {silver_path}");
     tracing::info!("Gold: {gold_path}");
 
-    // Block until shutdown signal — refiner and materializer run as spawned tasks
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Shutting down");
+    // Health endpoint for K8s probes (port 8081)
+    tokio::spawn(async { health::serve(8081).await });
+
+    // MCP server on stdio (blocks until client disconnects or signal)
+    mcp::run(Arc::new(ctx)).await?;
 
     Ok(())
 }

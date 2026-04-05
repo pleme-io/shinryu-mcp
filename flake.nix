@@ -50,8 +50,6 @@
           CARGO_CRATE_NAME = "rmcp";
         };
       };
-      # No HM module or NixOS module for this service
-      moduleDir = null;
-      nixosModuleFile = null;
+      moduleDir = ./module;
     };
 }

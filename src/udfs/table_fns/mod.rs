@@ -126,6 +126,35 @@ pub fn flow_summary_sql(experiment_id: &str) -> String {
     "#)
 }
 
+// ── Prediction accuracy views ──────────────────────────────────
+
+/// Pre-built SQL for prediction accuracy analysis — compares scaling formula
+/// predictions against actual burst results.
+pub fn prediction_accuracy_sql(experiment_id: &str) -> String {
+    format!(r#"
+        SELECT
+            scenario,
+            predicted_gw_replicas,
+            CAST(burst_replicas AS DOUBLE) / NULLIF(CAST(elapsed_ms AS DOUBLE) / 1000.0, 0) as actual_throughput,
+            predicted_throughput as predicted_throughput,
+            predicted_min_secs,
+            CAST(elapsed_ms AS DOUBLE) / 1000.0 as actual_secs,
+            prediction_verdict as verdict,
+            prediction_error_pct as error_pct,
+            prediction_formula as formula,
+            CASE
+                WHEN predicted_gw_replicas > burst_replicas THEN 'OVER_PROVISIONED'
+                WHEN predicted_gw_replicas < burst_replicas THEN 'UNDER_PROVISIONED'
+                ELSE 'MATCHED'
+            END as gw_provision_verdict
+        FROM events
+        WHERE experiment_id = '{experiment_id}'
+            AND event_type = 'BURST_COMPLETE'
+            AND predicted_gw_replicas IS NOT NULL
+        ORDER BY scenario
+    "#)
+}
+
 // ── Experiment analysis views ───────────────────────────────────
 
 /// Config comparison: rank all experiment configs by speed for a given pod count.

@@ -77,6 +77,15 @@ pub fn events_schema() -> Arc<Schema> {
         Field::new("state_reason", DataType::Utf8, true),
         Field::new("qos_class", DataType::Utf8, true),
 
+        // Prediction fields (from burst-forge scaling formulas)
+        Field::new("predicted_gw_replicas", DataType::UInt32, true),
+        Field::new("predicted_wh_replicas", DataType::UInt32, true),
+        Field::new("predicted_min_secs", DataType::Float64, true),
+        Field::new("predicted_throughput", DataType::Float64, true),
+        Field::new("prediction_formula", DataType::Utf8, true),
+        Field::new("prediction_verdict", DataType::Utf8, true),     // FASTER/ON_TARGET/SLOWER/UNDER_PROVISIONED
+        Field::new("prediction_error_pct", DataType::Float64, true),
+
         // Akeyless-specific
         Field::new("gw_request_duration_ms", DataType::UInt32, true),
         Field::new("gw_operation", DataType::Utf8, true),

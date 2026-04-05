@@ -161,6 +161,15 @@ impl ShinryuMcp {
             Err(e) => format!("Error: {e}"),
         }
     }
+
+    #[tool(description = "Prediction accuracy analysis — compares scaling formula predictions (GW replicas, throughput, timing) against actual burst results. Shows verdict (FASTER/ON_TARGET/SLOWER/UNDER_PROVISIONED) and error percentage for each scenario.")]
+    async fn predict(&self, Parameters(input): Parameters<ExperimentInput>) -> String {
+        let sql = udfs::table_fns::prediction_accuracy_sql(&input.experiment_id);
+        match query::execute_sql(&self.ctx, &sql).await {
+            Ok(result) => result,
+            Err(e) => format!("Error: {e}"),
+        }
+    }
 }
 
 #[tool_handler]

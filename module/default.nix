@@ -15,7 +15,7 @@
   ...
 }:
 with lib; let
-  inherit (hmHelpers) mkMcpOptions mkMcpServerEntry mkLaunchdService mkSystemdService mkAnvilRegistration;
+  inherit (hmHelpers) mkMcpOptions mkMcpServerEntry mkLaunchdService mkSystemdService;
   daemonCfg = config.services.shinryu.daemon;
   mcpCfg = config.services.shinryu.mcp;
   isDarwin = pkgs.stdenv.isDarwin;
@@ -107,15 +107,6 @@ in {
         args = [ "--analytics-path" analyticsPath ];
       };
     })
-
-    # Anvil self-registration (makes shinryu available to all agents)
-    (mkIf mcpCfg.enable (mkAnvilRegistration {
-      name = "shinryu";
-      command = "shinryu-mcp";
-      package = mcpCfg.package;
-      args = [ "--analytics-path" analyticsPath ];
-      scopes = mcpCfg.scopes;
-    }))
 
     # Ensure analytics directory exists
     (mkIf (daemonCfg.enable || mcpCfg.enable) {

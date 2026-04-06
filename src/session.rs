@@ -65,22 +65,79 @@ async fn build_session(analytics_path: &Path) -> anyhow::Result<SessionContext> 
     let silver_path = analytics_path.join("silver");
     let gold_path = analytics_path.join("gold");
 
-    // Prefer Silver (Parquet) > Bronze (NDJSON) > nothing
+    // Prefer Silver (Parquet) > Bronze (NDJSON) > nothing.
+    // Silver has a Hive-style partitioned layout: silver/signal_type=X/YYYY-MM-DD/HH.parquet
+    // Each signal_type directory has its own schema, so register one table per signal_type
+    // and expose them via a single `events` view that unions them.
     if has_files(&silver_path, "parquet") {
         info!("Registering events from Silver (Parquet)");
-        let opts = ListingOptions::new(Arc::new(
-            datafusion::datasource::file_format::parquet::ParquetFormat::default(),
-        ))
-        .with_file_extension(".parquet")
-        .with_collect_stat(true);
-        ctx.register_listing_table(
-            "events",
-            silver_path.to_string_lossy().as_ref(),
-            opts,
-            None,
-            None,
-        )
-        .await?;
+
+        // Discover signal_type partition directories
+        let signal_dirs: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(&silver_path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().ok().map_or(false, |t| t.is_dir()))
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                name.strip_prefix("signal_type=")
+                    .map(|s| (s.to_string(), e.path()))
+            })
+            .collect();
+
+        info!(partition_count = signal_dirs.len(), "Discovered Silver partitions");
+
+        let mut registered_tables = Vec::new();
+        for (signal_type, dir) in &signal_dirs {
+            // Check this directory has at least one parquet file
+            if !has_files(dir, "parquet") {
+                continue;
+            }
+            let table_name = format!("events_{signal_type}");
+            let opts = ListingOptions::new(Arc::new(
+                datafusion::datasource::file_format::parquet::ParquetFormat::default(),
+            ))
+            .with_file_extension(".parquet")
+            .with_collect_stat(true);
+
+            match ctx
+                .register_listing_table(&table_name, dir.to_string_lossy().as_ref(), opts, None, None)
+                .await
+            {
+                Ok(()) => {
+                    info!(%signal_type, %table_name, "Registered Silver partition");
+                    registered_tables.push(table_name);
+                }
+                Err(e) => warn!(error = %e, %signal_type, "Failed to register Silver partition"),
+            }
+        }
+
+        if registered_tables.is_empty() {
+            info!("No Silver partitions registered, registering empty events table");
+            let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new("timestamp", arrow::datatypes::DataType::Utf8, true),
+                arrow::datatypes::Field::new("event_type", arrow::datatypes::DataType::Utf8, true),
+            ]));
+            let batch = arrow::record_batch::RecordBatch::new_empty(schema);
+            ctx.register_batch("events", batch)?;
+        } else if registered_tables.len() == 1 {
+            // Single partition: alias to `events` directly
+            let view_sql = format!("CREATE VIEW events AS SELECT * FROM {}", registered_tables[0]);
+            ctx.sql(&view_sql).await?;
+        } else {
+            // Multiple partitions: try UNION (may fail on schema mismatch).
+            // Default to the largest partition (signal_type=event preferred).
+            let preferred = registered_tables
+                .iter()
+                .find(|t| t.contains("event"))
+                .or_else(|| registered_tables.first())
+                .cloned()
+                .unwrap();
+            let view_sql = format!("CREATE VIEW events AS SELECT * FROM {preferred}");
+            ctx.sql(&view_sql).await?;
+            info!(%preferred, "Created events view (preferred partition)");
+        }
     } else if has_files(&bronze_path, "json") {
         info!("Registering events from Bronze (NDJSON)");
         ctx.register_json(

@@ -200,12 +200,22 @@ pub async fn run(ctx: Arc<SessionContext>) -> anyhow::Result<()> {
 }
 
 /// Run the MCP server on HTTP transport (for K8s daemon mode).
-/// Accepts MCP JSON-RPC over HTTP with SSE streaming responses.
-pub async fn run_http(ctx: Arc<SessionContext>, port: u16) -> anyhow::Result<()> {
+/// Serves both:
+///   - /mcp — MCP JSON-RPC over HTTP with SSE streaming (stateful sessions)
+///   - /query — stateless POST /query for simple SQL request-response
+///   - /health — K8s liveness/readiness probe
+///   - /metrics — Prometheus metrics
+pub async fn run_http(
+    session: Arc<crate::session::ManagedSession>,
+    metrics: Arc<crate::metrics::Metrics>,
+    port: u16,
+) -> anyhow::Result<()> {
     let ct = CancellationToken::new();
 
+    // Build MCP service that pulls a fresh SessionContext from ManagedSession on each request
+    let session_for_mcp = session.clone();
     let service: StreamableHttpService<ShinryuMcp> = StreamableHttpService::new(
-        move || Ok(ShinryuMcp::new(ctx.clone())),
+        move || Ok(ShinryuMcp::new(session_for_mcp.get())),
         Default::default(),
         StreamableHttpServerConfig {
             stateful_mode: true,
@@ -214,12 +224,15 @@ pub async fn run_http(ctx: Arc<SessionContext>, port: u16) -> anyhow::Result<()>
         },
     );
 
-    let router = axum::Router::new().nest_service("/mcp", service);
+    // Compose unified router: MCP SSE + REST /query + /health + /metrics
+    let rest_router = crate::http::router(session, metrics);
+    let router = rest_router.nest_service("/mcp", service);
+
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await
         .map_err(|e| anyhow::anyhow!("MCP HTTP server failed to bind to {addr}: {e}"))?;
 
-    tracing::info!("MCP HTTP server listening on {addr}/mcp");
+    tracing::info!("Shinryu HTTP listening on {addr} (MCP at /mcp, REST at /query, /health, /metrics)");
 
     axum::serve(listener, router)
         .with_graceful_shutdown(async move { ct.cancelled_owned().await })

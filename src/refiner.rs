@@ -1,152 +1,199 @@
 //! Bronze → Silver refiner.
 //!
-//! Two modes:
-//! - Event-driven (default): watches Bronze directory for new files via inotify
-//! - Polling (fallback): scans every interval_secs for new files
-//!
-//! When a new Bronze NDJSON file is detected, immediately refines it to
-//! Silver Parquet (typed, sorted, deduped). Sends the Silver file path
-//! to the materializer via a tokio channel.
+//! Consumes FsEvent::NewFile from the directory watcher broadcast channel.
+//! Reads NDJSON from Bronze, writes Parquet to Silver.
+//! Does a catchup scan on startup for files missed before the watcher started.
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use datafusion::prelude::*;
-use notify::{Event, EventKind, RecursiveMode, Watcher};
-use std::path::{Path, PathBuf};
-use tokio::sync::mpsc;
-use tokio::time::{self, Duration};
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use tokio::sync::{broadcast, mpsc};
+use tracing::{debug, error, info, warn};
 
-/// Run the Bronze → Silver refiner with inotify watching.
-///
-/// Falls back to polling if inotify fails (e.g., NFS mount without inotify).
+use crate::metrics::Metrics;
+use crate::watcher::FsEvent;
+
+/// Run the refiner, consuming filesystem events and promoting Bronze → Silver.
 pub async fn run(
-    bronze_path: String,
-    silver_path: String,
+    bronze_path: PathBuf,
+    silver_path: PathBuf,
+    mut fs_events: broadcast::Receiver<FsEvent>,
     silver_tx: mpsc::Sender<PathBuf>,
+    metrics: Arc<Metrics>,
 ) {
-    let _ = std::fs::create_dir_all(&silver_path);
+    info!("Refiner started");
 
-    // Try event-driven mode first
-    if let Err(e) = run_event_driven(&bronze_path, &silver_path, &silver_tx).await {
-        tracing::warn!("inotify watcher failed ({e}), falling back to polling");
-        run_polling(&bronze_path, &silver_path, &silver_tx).await;
+    // Ensure silver directory exists
+    if let Err(e) = std::fs::create_dir_all(&silver_path) {
+        error!(error = %e, "Failed to create silver directory");
+        return;
     }
-}
 
-/// Event-driven mode: inotify watches for new .json files.
-async fn run_event_driven(
-    bronze_path: &str,
-    silver_path: &str,
-    silver_tx: &mpsc::Sender<PathBuf>,
-) -> anyhow::Result<()> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<PathBuf>(100);
+    let mut processed: HashSet<PathBuf> = HashSet::new();
 
-    let bronze_clone = bronze_path.to_string();
-    let tx_clone = tx.clone();
-    let mut watcher = notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-        if let Ok(event) = res {
-            if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
-                for path in &event.paths {
-                    if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                        let _ = tx_clone.blocking_send(path.clone());
-                    }
+    // Startup catchup: process any Bronze files that don't have Silver counterparts
+    catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
+
+    // Main event loop
+    loop {
+        match fs_events.recv().await {
+            Ok(FsEvent::NewFile(path)) => {
+                if !is_bronze_json(&path, &bronze_path) {
+                    continue;
+                }
+                if processed.contains(&path) {
+                    continue;
+                }
+                // Wait for file to stabilize (Vector may still be writing)
+                if !file_is_stable(&path, Duration::from_secs(2)) {
+                    debug!(?path, "File not stable yet, will retry on next event");
+                    continue;
+                }
+                if let Err(e) = refine_file(&path, &bronze_path, &silver_path, &metrics).await {
+                    warn!(error = %e, ?path, "Failed to refine file");
+                    metrics.refine_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    processed.insert(path.clone());
+                    let _ = silver_tx.send(silver_path.clone()).await;
                 }
             }
-        }
-    })?;
-
-    watcher.watch(Path::new(&bronze_clone), RecursiveMode::Recursive)?;
-    tracing::info!("Refiner watching {bronze_path} for new Bronze files (inotify)");
-
-    // Also process any existing files on startup
-    process_existing_files(bronze_path, silver_path, silver_tx).await;
-
-    // Process events as they arrive
-    while let Some(json_path) = rx.recv().await {
-        let silver_file = derive_silver_path(&json_path, bronze_path, silver_path);
-        match refine_single(&json_path, &silver_file).await {
-            Ok(()) => {
-                tracing::debug!("Refined {} → {}", json_path.display(), silver_file.display());
-                let _ = silver_tx.send(silver_file).await;
+            Ok(FsEvent::NewDirectory(_)) => {
+                // New Bronze subdirectory — do a catchup scan
+                catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
             }
-            Err(e) => tracing::warn!("Refine failed for {}: {e}", json_path.display()),
-        }
-    }
-
-    Ok(())
-}
-
-/// Polling fallback mode.
-async fn run_polling(
-    bronze_path: &str,
-    silver_path: &str,
-    silver_tx: &mpsc::Sender<PathBuf>,
-) {
-    loop {
-        process_existing_files(bronze_path, silver_path, silver_tx).await;
-        time::sleep(Duration::from_secs(60)).await;
-    }
-}
-
-/// Process all existing Bronze files that don't have a corresponding Silver file.
-async fn process_existing_files(
-    bronze_path: &str,
-    silver_path: &str,
-    silver_tx: &mpsc::Sender<PathBuf>,
-) {
-    let json_files = find_json_files(Path::new(bronze_path));
-    for file in &json_files {
-        let silver_file = derive_silver_path(file, bronze_path, silver_path);
-        if silver_file.exists() {
-            continue; // Already refined
-        }
-        match refine_single(file, &silver_file).await {
-            Ok(()) => {
-                let _ = silver_tx.send(silver_file).await;
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                warn!(missed = n, "Refiner lagged, running catchup scan");
+                catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
             }
-            Err(e) => tracing::warn!("Refine failed for {}: {e}", file.display()),
+            Err(broadcast::error::RecvError::Closed) => {
+                info!("Watcher channel closed, refiner exiting");
+                break;
+            }
         }
     }
 }
 
-/// Derive the Silver output path from a Bronze input path.
-fn derive_silver_path(json_path: &Path, bronze_base: &str, silver_base: &str) -> PathBuf {
-    let relative = json_path.strip_prefix(bronze_base).unwrap_or(json_path);
-    Path::new(silver_base).join(relative.with_extension("parquet"))
+/// Scan Bronze for unprocessed .json files and refine them.
+async fn catchup_scan(
+    bronze_path: &Path,
+    silver_path: &Path,
+    processed: &mut HashSet<PathBuf>,
+    silver_tx: &mpsc::Sender<PathBuf>,
+    metrics: &Metrics,
+) {
+    if !bronze_path.exists() {
+        return;
+    }
+
+    let json_files: Vec<PathBuf> = walkdir::WalkDir::new(bronze_path)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "json"))
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    let mut refined = 0;
+    for path in json_files {
+        if processed.contains(&path) {
+            continue;
+        }
+        if !file_is_stable(&path, Duration::from_secs(2)) {
+            continue;
+        }
+        match refine_file(&path, bronze_path, silver_path, metrics).await {
+            Ok(()) => {
+                processed.insert(path);
+                refined += 1;
+            }
+            Err(e) => {
+                warn!(error = %e, "Catchup refine failed");
+            }
+        }
+    }
+
+    if refined > 0 {
+        info!(refined, "Catchup scan complete");
+        let _ = silver_tx.send(silver_path.to_path_buf()).await;
+    }
 }
 
 /// Refine a single Bronze NDJSON file to Silver Parquet.
-async fn refine_single(json_path: &Path, parquet_path: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = parquet_path.parent() {
+async fn refine_file(
+    json_path: &Path,
+    bronze_root: &Path,
+    silver_root: &Path,
+    metrics: &Metrics,
+) -> anyhow::Result<()> {
+    // Compute silver output path: mirror bronze directory structure
+    let relative = json_path.strip_prefix(bronze_root)?;
+    let parquet_name = relative.with_extension("parquet");
+    let silver_file = silver_root.join(&parquet_name);
+
+    // Skip if already refined
+    if silver_file.exists() {
+        return Ok(());
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = silver_file.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
+    // Read NDJSON via DataFusion
     let ctx = SessionContext::new();
-    let options = NdJsonReadOptions::default();
-    ctx.register_json("bronze", json_path.to_str().unwrap_or(""), options).await?;
+    let json_dir = json_path.parent().unwrap_or(bronze_root);
+    let filename = json_path.file_name().unwrap().to_string_lossy();
 
-    let df = ctx.sql("SELECT * FROM bronze ORDER BY timestamp_ms").await?;
+    ctx.register_json("bronze_src", json_dir.to_string_lossy().as_ref(),
+        NdJsonReadOptions::default().file_extension(&filename),
+    ).await?;
 
-    let tmp_path = parquet_path.with_extension("parquet.tmp");
-    let writer_opts = datafusion::dataframe::DataFrameWriteOptions::new();
-    df.write_parquet(tmp_path.to_str().unwrap_or(""), writer_opts, None).await?;
+    let df = ctx.sql("SELECT * FROM bronze_src").await?;
+    let batches = df.collect().await?;
 
-    std::fs::rename(&tmp_path, parquet_path)?;
+    if batches.is_empty() {
+        return Ok(());
+    }
+
+    // Write Parquet
+    let schema = batches[0].schema();
+    let tmp_path = silver_file.with_extension("tmp");
+    let file = std::fs::File::create(&tmp_path)?;
+    let props = WriterProperties::builder()
+        .set_compression(parquet::basic::Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+
+    let mut total_rows = 0u64;
+    for batch in &batches {
+        total_rows += batch.num_rows() as u64;
+        writer.write(batch)?;
+    }
+    writer.close()?;
+
+    // Atomic rename
+    std::fs::rename(&tmp_path, &silver_file)?;
+
+    metrics.files_refined.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    metrics.rows_ingested.fetch_add(total_rows, std::sync::atomic::Ordering::Relaxed);
+
+    info!(rows = total_rows, ?silver_file, "Refined Bronze → Silver");
     Ok(())
 }
 
-/// Recursively find all .json files in a directory.
-fn find_json_files(dir: &Path) -> Vec<PathBuf> {
-    let mut results = Vec::new();
-    fn walk(dir: &Path, results: &mut Vec<PathBuf>) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() { walk(&path, results); }
-                else if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    results.push(path);
-                }
-            }
-        }
-    }
-    walk(dir, &mut results);
-    results
+fn is_bronze_json(path: &Path, bronze_root: &Path) -> bool {
+    path.starts_with(bronze_root)
+        && path.extension().is_some_and(|ext| ext == "json")
+}
+
+fn file_is_stable(path: &Path, min_age: Duration) -> bool {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .map(|t| t.elapsed().unwrap_or_default() >= min_age)
+        .unwrap_or(false)
 }

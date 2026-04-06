@@ -3042,11 +3042,13 @@ name = "shinryu-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "arrow",
  "axum",
  "chrono",
  "clap",
  "datafusion",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -3060,10 +3062,13 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "shikumi",
+ "tempfile",
  "tokio",
  "tokio-util",
+ "tower",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]

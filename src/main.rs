@@ -12,14 +12,18 @@
 
 mod compactor;
 mod health;
+mod http;
 mod ingest;
 mod materializer;
 mod mcp;
+mod metrics;
 mod query;
 mod refiner;
 mod schema;
+mod session;
 mod tools;
 mod udfs;
+mod watcher;
 
 use std::sync::Arc;
 
@@ -82,26 +86,55 @@ async fn main() -> anyhow::Result<()> {
     udfs::register_all(&ctx);
 
     // Bronze/Silver/Gold data lakehouse paths
-    let bronze_path = format!("{}/bronze", cli.analytics_path);
-    let silver_path = format!("{}/silver", cli.analytics_path);
-    let gold_path = format!("{}/gold", cli.analytics_path);
+    let analytics = std::path::Path::new(&cli.analytics_path);
+    let bronze_path = analytics.join("bronze");
+    let silver_path = analytics.join("silver");
+    let gold_path = analytics.join("gold");
+
+    // Shared metrics
+    let metrics = Arc::new(metrics::Metrics::new());
+
+    // Directory watcher with broadcast event bus
+    let dir_watcher = watcher::DirectoryWatcher::new(analytics, watcher::WatcherConfig::default())?;
+    let fs_events = dir_watcher.subscribe();
 
     // Channel: refiner → materializer (event-driven, no polling)
     let (silver_tx, silver_rx) = tokio::sync::mpsc::channel(100);
 
-    // Spawn Bronze → Silver refiner (inotify event-driven)
-    let refiner_bronze = bronze_path.clone();
-    let refiner_silver = silver_path.clone();
-    tokio::spawn(async move {
-        refiner::run(refiner_bronze, refiner_silver, silver_tx).await;
-    });
+    // Channel: materializer → session refresh
+    let (session_tx, session_rx) = tokio::sync::mpsc::channel(32);
+
+    // Spawn Bronze → Silver refiner (broadcast consumer)
+    {
+        let bronze = bronze_path.clone();
+        let silver = silver_path.clone();
+        let m = Arc::clone(&metrics);
+        tokio::spawn(async move {
+            refiner::run(bronze, silver, fs_events, silver_tx, m).await;
+        });
+    }
 
     // Spawn Silver → Gold materializer (channel-driven from refiner)
-    let mat_silver = silver_path.clone();
-    let mat_gold = gold_path.clone();
-    tokio::spawn(async move {
-        materializer::run(mat_silver, mat_gold, silver_rx).await;
-    });
+    {
+        let silver = silver_path.clone();
+        let gold = gold_path.clone();
+        let m = Arc::clone(&metrics);
+        tokio::spawn(async move {
+            materializer::run(silver, gold, silver_rx, session_tx, m).await;
+        });
+    }
+
+    // Spawn session refresh loop
+    let managed_session = Arc::new(session::ManagedSession::new(analytics).await?);
+    {
+        let ms = Arc::clone(&managed_session);
+        tokio::spawn(async move {
+            session::run_refresh_loop(ms, session_rx).await;
+        });
+    }
+
+    // Keep the watcher alive for the lifetime of the process
+    let _watcher_guard = dir_watcher;
 
     // Spawn TTL lifecycle cleanup (30-day expiry)
     let lifecycle_path = cli.analytics_path.clone();
@@ -123,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
         let config: DatasetsFile = serde_yaml::from_str(&config_content)
             .map_err(|e| anyhow::anyhow!("Failed to parse datasets config: {e}"))?;
 
-        let count = ingest::confluence::ingest_datasets(&config.datasets, &bronze_path)?;
+        let count = ingest::confluence::ingest_datasets(&config.datasets, &bronze_path.to_string_lossy())?;
         println!("Ingested {count} records from {} datasets into Bronze", config.datasets.len());
         println!("Refiner will produce Silver Parquet on next cycle");
         return Ok(());
@@ -172,9 +205,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tracing::info!("Bronze: {bronze_path}");
-    tracing::info!("Silver: {silver_path}");
-    tracing::info!("Gold: {gold_path}");
+    tracing::info!(?bronze_path, "Bronze tier");
+    tracing::info!(?silver_path, "Silver tier");
+    tracing::info!(?gold_path, "Gold tier");
 
     // Health endpoint for K8s probes (port 8081)
     tokio::spawn(async { health::serve(8081).await });

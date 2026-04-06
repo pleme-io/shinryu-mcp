@@ -1,64 +1,132 @@
 //! Silver → Gold materializer.
 //!
-//! Channel-driven: receives Silver file paths from the refiner,
-//! materializes Gold views when new data arrives.
-//! No polling — zero CPU when idle.
+//! Receives notifications from the refiner when new Silver Parquet files
+//! are written. Runs aggregate views and writes results to Gold.
+//! Notifies the session manager to re-register tables.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use datafusion::datasource::listing::ListingOptions;
 use datafusion::prelude::*;
-use std::path::{Path, PathBuf};
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
 use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 
-/// Run the materializer, driven by Silver file notifications from the refiner.
+use crate::metrics::Metrics;
+use crate::session::SessionEvent;
+use crate::udfs;
+
+/// Run the materializer, consuming Silver notifications and producing Gold views.
 pub async fn run(
-    silver_path: String,
-    gold_path: String,
+    silver_path: PathBuf,
+    gold_path: PathBuf,
     mut silver_rx: mpsc::Receiver<PathBuf>,
+    session_tx: mpsc::Sender<SessionEvent>,
+    metrics: Arc<Metrics>,
 ) {
-    let _ = std::fs::create_dir_all(&gold_path);
+    info!("Materializer started");
 
-    tracing::info!("Materializer waiting for Silver file notifications");
+    if let Err(e) = std::fs::create_dir_all(&gold_path) {
+        error!(error = %e, "Failed to create gold directory");
+        return;
+    }
 
-    while let Some(_silver_file) = silver_rx.recv().await {
-        // Debounce: drain any additional notifications that arrived
+    while let Some(_) = silver_rx.recv().await {
+        // Debounce: wait a moment then drain any pending notifications
+        tokio::time::sleep(Duration::from_secs(5)).await;
         while silver_rx.try_recv().is_ok() {}
 
-        if let Err(e) = materialize_all(&silver_path, &gold_path).await {
-            tracing::warn!("Materializer error: {e}");
+        info!("Materializing Gold views from Silver");
+
+        match materialize(&silver_path, &gold_path, &metrics).await {
+            Ok(()) => {
+                metrics.files_materialized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Notify session manager to re-register
+                let _ = session_tx.send(SessionEvent::GoldUpdated).await;
+                let _ = session_tx.send(SessionEvent::SilverChanged).await;
+                info!("Gold materialization complete");
+            }
+            Err(e) => {
+                warn!(error = %e, "Gold materialization failed");
+            }
         }
     }
 }
 
-/// Materialize all Gold views from Silver data.
-async fn materialize_all(silver_path: &str, gold_path: &str) -> anyhow::Result<()> {
-    let silver = Path::new(silver_path);
-    if !silver.exists() {
+async fn materialize(
+    silver_path: &PathBuf,
+    gold_path: &PathBuf,
+    _metrics: &Metrics,
+) -> anyhow::Result<()> {
+    if !silver_path.exists() {
+        return Ok(());
+    }
+
+    // Check if Silver has any Parquet files
+    let has_parquet = walkdir::WalkDir::new(silver_path)
+        .into_iter()
+        .filter_map(Result::ok)
+        .any(|e| e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "parquet"));
+
+    if !has_parquet {
         return Ok(());
     }
 
     let ctx = SessionContext::new();
-    let options = ParquetReadOptions::default();
-    ctx.register_parquet("events", silver_path, options).await?;
+    udfs::register_all(&ctx);
 
-    crate::udfs::register_all(&ctx);
+    let opts = ListingOptions::new(Arc::new(datafusion::datasource::file_format::parquet::ParquetFormat::default()))
+        .with_file_extension(".parquet")
+        .with_collect_stat(true);
+    ctx.register_listing_table("events", silver_path.to_string_lossy().as_ref(), opts, None, None).await?;
 
-    let views: Vec<(&str, String)> = vec![
-        ("experiment_summaries", crate::udfs::table_fns::burst_summary_sql("*").replace("'*'", "experiment_id")),
-        ("phase_timings", crate::udfs::table_fns::phase_breakdown_sql("*").replace("'*'", "experiment_id")),
-    ];
+    // Materialize experiment summaries
+    let summaries_sql = r#"
+        SELECT
+            experiment_id,
+            scenario,
+            MAX(CAST(running AS BIGINT)) as max_running,
+            MAX(CAST(injected AS BIGINT)) as max_injected,
+            MAX(elapsed_ms) as duration_ms,
+            MAX(CAST(peak_running AS BIGINT)) as peak_running,
+            COUNT(*) as event_count
+        FROM events
+        WHERE event_type IS NOT NULL
+        GROUP BY experiment_id, scenario
+    "#;
 
-    for (name, sql) in &views {
-        let gold_file = format!("{gold_path}/{name}.parquet");
-        match materialize_view(&ctx, sql, &gold_file).await {
-            Ok(()) => tracing::debug!("Materialized {name}"),
-            Err(e) => tracing::warn!("Failed to materialize {name}: {e}"),
-        }
+    if let Err(e) = materialize_view(&ctx, summaries_sql, &gold_path.join("experiment_summaries.parquet")).await {
+        warn!(error = %e, "Failed to materialize experiment_summaries");
+    }
+
+    // Materialize phase timings
+    let phases_sql = r#"
+        SELECT
+            experiment_id,
+            scenario,
+            event_type,
+            elapsed_ms as duration_ms,
+            timestamp
+        FROM events
+        WHERE event_type = 'PHASE_COMPLETE'
+        ORDER BY experiment_id, scenario, timestamp
+    "#;
+
+    if let Err(e) = materialize_view(&ctx, phases_sql, &gold_path.join("phase_timings.parquet")).await {
+        warn!(error = %e, "Failed to materialize phase_timings");
     }
 
     Ok(())
 }
 
-/// Execute SQL and write result as Gold Parquet.
-async fn materialize_view(ctx: &SessionContext, sql: &str, output_path: &str) -> anyhow::Result<()> {
+async fn materialize_view(
+    ctx: &SessionContext,
+    sql: &str,
+    output_path: &PathBuf,
+) -> anyhow::Result<()> {
     let df = ctx.sql(sql).await?;
     let batches = df.collect().await?;
 
@@ -66,18 +134,20 @@ async fn materialize_view(ctx: &SessionContext, sql: &str, output_path: &str) ->
         return Ok(());
     }
 
-    let tmp_path = format!("{output_path}.tmp");
-    let writer_opts = datafusion::dataframe::DataFrameWriteOptions::new();
-
     let schema = batches[0].schema();
-    let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches])?;
-    ctx.register_table("_gold_tmp", std::sync::Arc::new(mem_table))?;
+    let tmp_path = output_path.with_extension("tmp");
+    let file = std::fs::File::create(&tmp_path)?;
+    let props = WriterProperties::builder()
+        .set_compression(parquet::basic::Compression::SNAPPY)
+        .build();
+    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
 
-    let df = ctx.sql("SELECT * FROM _gold_tmp").await?;
-    df.write_parquet(&tmp_path, writer_opts, None).await?;
+    for batch in &batches {
+        writer.write(batch)?;
+    }
+    writer.close()?;
 
     std::fs::rename(&tmp_path, output_path)?;
-    ctx.deregister_table("_gold_tmp")?;
-
+    info!(?output_path, "Materialized Gold view");
     Ok(())
 }

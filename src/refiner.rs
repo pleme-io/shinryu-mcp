@@ -39,40 +39,56 @@ pub async fn run(
     // Startup catchup: process any Bronze files that don't have Silver counterparts
     catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
 
+    // Periodic timer for safety-net catchup scans (every 30s).
+    // This handles two cases the event watcher misses:
+    //   1. Vector appending to an existing file (modify, not create) where the
+    //      OS doesn't generate a usable inotify event
+    //   2. Files that were "not stable" on first pass and need a retry
+    let mut periodic_scan = tokio::time::interval(Duration::from_secs(30));
+    periodic_scan.tick().await; // Skip immediate first tick (catchup_scan above already ran)
+
     // Main event loop
     loop {
-        match fs_events.recv().await {
-            Ok(FsEvent::NewFile(path)) => {
-                if !is_bronze_json(&path, &bronze_path) {
-                    continue;
-                }
-                if processed.contains(&path) {
-                    continue;
-                }
-                // Wait for file to stabilize (Vector may still be writing)
-                if !file_is_stable(&path, Duration::from_secs(2)) {
-                    debug!(?path, "File not stable yet, will retry on next event");
-                    continue;
-                }
-                if let Err(e) = refine_file(&path, &bronze_path, &silver_path, &metrics).await {
-                    warn!(error = %e, ?path, "Failed to refine file");
-                    metrics.refine_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    processed.insert(path.clone());
-                    let _ = silver_tx.send(silver_path.clone()).await;
+        tokio::select! {
+            event = fs_events.recv() => {
+                match event {
+                    Ok(FsEvent::NewFile(path)) => {
+                        if !is_bronze_json(&path, &bronze_path) {
+                            continue;
+                        }
+                        if processed.contains(&path) {
+                            continue;
+                        }
+                        // Wait for file to stabilize (Vector may still be writing)
+                        if !file_is_stable(&path, Duration::from_millis(500)) {
+                            debug!(?path, "File not stable yet, will retry via periodic scan");
+                            continue;
+                        }
+                        if let Err(e) = refine_file(&path, &bronze_path, &silver_path, &metrics).await {
+                            warn!(error = %e, ?path, "Failed to refine file");
+                            metrics.refine_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        } else {
+                            processed.insert(path.clone());
+                            let _ = silver_tx.send(silver_path.clone()).await;
+                        }
+                    }
+                    Ok(FsEvent::NewDirectory(_)) => {
+                        catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(missed = n, "Refiner lagged, running catchup scan");
+                        catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        info!("Watcher channel closed, refiner exiting");
+                        break;
+                    }
                 }
             }
-            Ok(FsEvent::NewDirectory(_)) => {
-                // New Bronze subdirectory — do a catchup scan
+            _ = periodic_scan.tick() => {
+                // Safety-net catchup: scan Bronze for any unprocessed files
+                // (handles Vector append-only writes that don't trigger create events)
                 catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(missed = n, "Refiner lagged, running catchup scan");
-                catchup_scan(&bronze_path, &silver_path, &mut processed, &silver_tx, &metrics).await;
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                info!("Watcher channel closed, refiner exiting");
-                break;
             }
         }
     }
@@ -102,7 +118,7 @@ async fn catchup_scan(
         if processed.contains(&path) {
             continue;
         }
-        if !file_is_stable(&path, Duration::from_secs(2)) {
+        if !file_is_stable(&path, Duration::from_millis(500)) {
             continue;
         }
         match refine_file(&path, bronze_path, silver_path, metrics).await {

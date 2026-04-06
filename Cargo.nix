@@ -10029,6 +10029,10 @@ rec {
             packageId = "anyhow";
           }
           {
+            name = "arc-swap";
+            packageId = "arc-swap";
+          }
+          {
             name = "arrow";
             packageId = "arrow";
             features = [ "json" ];
@@ -10049,6 +10053,10 @@ rec {
           {
             name = "datafusion";
             packageId = "datafusion";
+          }
+          {
+            name = "http";
+            packageId = "http";
           }
           {
             name = "http-body-util";
@@ -10117,6 +10125,10 @@ rec {
             features = [ "rt" ];
           }
           {
+            name = "tower";
+            packageId = "tower";
+          }
+          {
             name = "tracing";
             packageId = "tracing";
           }
@@ -10124,6 +10136,16 @@ rec {
             name = "tracing-subscriber";
             packageId = "tracing-subscriber";
             features = [ "env-filter" ];
+          }
+          {
+            name = "walkdir";
+            packageId = "walkdir";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "tempfile";
+            packageId = "tempfile";
           }
         ];
 

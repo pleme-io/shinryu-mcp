@@ -38,7 +38,7 @@
       registry = "ghcr.io/pleme-io/shinryu-mcp";
       packageName = "shinryu-mcp";
       namespace = "observability";
-      architectures = [ "arm64" ];
+      architectures = [ "amd64" "arm64" ];
       serviceType = "rest";
       ports = {
         http = 8080;

@@ -120,3 +120,90 @@ pub async fn execute_sql(ctx: &SessionContext, sql: &str) -> anyhow::Result<Stri
     let formatted = arrow::util::pretty::pretty_format_batches(&batches)?;
     Ok(formatted.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn execute_sql_returns_formatted_output() {
+        let ctx = SessionContext::new();
+        let result = execute_sql(&ctx, "SELECT 1 as n, 'hello' as msg").await.unwrap();
+        assert!(result.contains("1"), "should contain the numeric value");
+        assert!(result.contains("hello"), "should contain the string value");
+    }
+
+    #[tokio::test]
+    async fn execute_sql_empty_result_returns_no_results() {
+        let ctx = SessionContext::new();
+        let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("x", arrow::datatypes::DataType::Int32, true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::new_empty(schema);
+        ctx.register_batch("empty_tbl", batch).unwrap();
+        let result = execute_sql(&ctx, "SELECT * FROM empty_tbl").await.unwrap();
+        assert_eq!(result, "No results.");
+    }
+
+    #[tokio::test]
+    async fn execute_sql_invalid_sql_returns_error() {
+        let ctx = SessionContext::new();
+        let result = execute_sql(&ctx, "THIS IS NOT SQL").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_sql_reference_missing_table_returns_error() {
+        let ctx = SessionContext::new();
+        let result = execute_sql(&ctx, "SELECT * FROM nonexistent_table").await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn has_files_recursive_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(!has_files_recursive(tmp.path().to_str().unwrap(), "json"));
+    }
+
+    #[test]
+    fn has_files_recursive_nonexistent_dir() {
+        assert!(!has_files_recursive("/tmp/definitely_not_existing_dir_xyz", "json"));
+    }
+
+    #[test]
+    fn has_files_recursive_finds_nested_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let nested = tmp.path().join("sub1").join("sub2");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("data.parquet"), b"fake").unwrap();
+        assert!(has_files_recursive(tmp.path().to_str().unwrap(), "parquet"));
+        assert!(!has_files_recursive(tmp.path().to_str().unwrap(), "json"));
+    }
+
+    #[test]
+    fn has_files_recursive_ignores_wrong_extension() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("data.txt"), b"hello").unwrap();
+        assert!(!has_files_recursive(tmp.path().to_str().unwrap(), "json"));
+    }
+
+    #[tokio::test]
+    async fn create_session_with_empty_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("bronze")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("silver")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("gold")).unwrap();
+        let ctx = create_session(tmp.path().to_str().unwrap()).await.unwrap();
+        let result = execute_sql(&ctx, "SELECT 1 as x").await.unwrap();
+        assert!(result.contains("1"));
+    }
+
+    #[tokio::test]
+    async fn create_session_nonexistent_path_still_creates_context() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("nonexistent");
+        let ctx = create_session(path.to_str().unwrap()).await.unwrap();
+        let result = execute_sql(&ctx, "SELECT 42 as answer").await.unwrap();
+        assert!(result.contains("42"));
+    }
+}

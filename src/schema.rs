@@ -95,3 +95,76 @@ pub fn events_schema() -> Arc<Schema> {
         Field::new("raw", DataType::Utf8, true),
     ]))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::DataType;
+
+    #[test]
+    fn schema_field_count_is_stable() {
+        let schema = events_schema();
+        assert_eq!(
+            schema.fields().len(),
+            63,
+            "Schema field count changed — update tests and downstream SQL if intentional"
+        );
+    }
+
+    #[test]
+    fn critical_fields_present_with_correct_types() {
+        let schema = events_schema();
+        let cases: &[(&str, DataType)] = &[
+            ("timestamp", DataType::Utf8),
+            ("timestamp_ms", DataType::Int64),
+            ("experiment_id", DataType::Utf8),
+            ("signal_type", DataType::Utf8),
+            ("event_type", DataType::Utf8),
+            ("metric_value", DataType::Float64),
+            ("scenario", DataType::Utf8),
+            ("elapsed_ms", DataType::UInt64),
+            ("injection_rate", DataType::Float64),
+            ("src_pod", DataType::Utf8),
+            ("dst_pod", DataType::Utf8),
+            ("verdict", DataType::Utf8),
+            ("raw", DataType::Utf8),
+        ];
+        for (name, expected_type) in cases {
+            let field = schema
+                .field_with_name(name)
+                .unwrap_or_else(|_| panic!("Critical field '{name}' missing from schema"));
+            assert_eq!(
+                field.data_type(),
+                expected_type,
+                "Field '{name}' has wrong type: expected {expected_type:?}, got {:?}",
+                field.data_type()
+            );
+            assert!(field.is_nullable(), "Field '{name}' should be nullable");
+        }
+    }
+
+    #[test]
+    fn no_duplicate_field_names() {
+        let schema = events_schema();
+        let mut seen = std::collections::HashSet::new();
+        for field in schema.fields() {
+            assert!(
+                seen.insert(field.name().clone()),
+                "Duplicate field name: {}",
+                field.name()
+            );
+        }
+    }
+
+    #[test]
+    fn all_fields_are_nullable() {
+        let schema = events_schema();
+        for field in schema.fields() {
+            assert!(
+                field.is_nullable(),
+                "Field '{}' is not nullable — all signals may omit any field",
+                field.name()
+            );
+        }
+    }
+}

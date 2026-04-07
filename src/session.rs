@@ -275,4 +275,90 @@ mod tests {
             .value(0);
         assert_eq!(cnt, 2);
     }
+
+    #[tokio::test]
+    async fn refresh_swaps_session_context() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for tier in ["bronze", "silver", "gold"] {
+            std::fs::create_dir_all(tmp.path().join(tier)).unwrap();
+        }
+        let session = ManagedSession::new(tmp.path()).await.unwrap();
+        let ctx1 = session.get();
+
+        session.refresh().await.unwrap();
+        let ctx2 = session.get();
+        assert!(
+            !Arc::ptr_eq(&ctx1, &ctx2),
+            "refresh should produce a new SessionContext"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_returns_arc_that_outlives_refresh() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for tier in ["bronze", "silver", "gold"] {
+            std::fs::create_dir_all(tmp.path().join(tier)).unwrap();
+        }
+        let session = ManagedSession::new(tmp.path()).await.unwrap();
+        let old_ctx = session.get();
+        session.refresh().await.unwrap();
+        // Old context should still be usable
+        let result = old_ctx.sql("SELECT 1 as x").await;
+        assert!(result.is_ok(), "old context should remain usable after refresh");
+    }
+
+    #[tokio::test]
+    async fn session_has_udfs_registered() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for tier in ["bronze", "silver", "gold"] {
+            std::fs::create_dir_all(tmp.path().join(tier)).unwrap();
+        }
+        let session = ManagedSession::new(tmp.path()).await.unwrap();
+        let ctx = session.get();
+        let df = ctx.sql("SELECT tumbling_window(1000, 500) as tw").await;
+        assert!(df.is_ok(), "tumbling_window UDF should be available");
+    }
+
+    #[tokio::test]
+    async fn run_refresh_loop_exits_when_sender_dropped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for tier in ["bronze", "silver", "gold"] {
+            std::fs::create_dir_all(tmp.path().join(tier)).unwrap();
+        }
+        let session = Arc::new(ManagedSession::new(tmp.path()).await.unwrap());
+        let (tx, rx) = mpsc::channel(4);
+
+        let handle = tokio::spawn(run_refresh_loop(session, rx));
+        drop(tx);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        assert!(result.is_ok(), "loop should exit when sender is dropped");
+    }
+
+    #[test]
+    fn has_files_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(!has_files(tmp.path(), "json"));
+    }
+
+    #[test]
+    fn has_files_nonexistent_dir() {
+        assert!(!has_files(Path::new("/nonexistent_xyz"), "json"));
+    }
+
+    #[test]
+    fn has_files_finds_matching_extension() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("data.parquet"), b"fake").unwrap();
+        assert!(has_files(tmp.path(), "parquet"));
+        assert!(!has_files(tmp.path(), "json"));
+    }
+
+    #[test]
+    fn has_files_recursive_in_subdirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sub = tmp.path().join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("deep.json"), b"{}").unwrap();
+        assert!(has_files(tmp.path(), "json"));
+    }
 }

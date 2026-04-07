@@ -115,4 +115,71 @@ mod tests {
         let latencies = m.query_latencies_ms.lock().unwrap();
         assert!(latencies.len() <= 10_001);
     }
+
+    #[test]
+    fn prometheus_no_summary_when_empty() {
+        let m = Metrics::new();
+        let out = m.to_prometheus();
+        assert!(out.contains("shinryu_files_refined_total 0"));
+        assert!(
+            !out.contains("shinryu_query_duration_seconds"),
+            "should not emit summary section when no latencies recorded"
+        );
+    }
+
+    #[test]
+    fn prometheus_single_latency() {
+        let m = Metrics::new();
+        m.record_query_latency(42.0);
+        let out = m.to_prometheus();
+        assert!(out.contains("shinryu_query_duration_seconds_count 1"));
+        assert!(out.contains("quantile=\"0.5\""));
+        assert!(out.contains("quantile=\"0.99\""));
+    }
+
+    #[test]
+    fn prometheus_p99_index_for_two_values() {
+        let m = Metrics::new();
+        m.record_query_latency(100.0);
+        m.record_query_latency(200.0);
+        let out = m.to_prometheus();
+        assert!(out.contains("shinryu_query_duration_seconds_count 2"));
+    }
+
+    #[test]
+    fn all_counters_appear_in_output() {
+        let m = Metrics::new();
+        let out = m.to_prometheus();
+        let expected = [
+            "shinryu_files_refined_total",
+            "shinryu_files_materialized_total",
+            "shinryu_rows_ingested_total",
+            "shinryu_refine_errors_total",
+            "shinryu_queries_executed_total",
+            "shinryu_query_errors_total",
+            "shinryu_events_received_total",
+        ];
+        for name in &expected {
+            assert!(out.contains(name), "Missing counter: {name}");
+        }
+    }
+
+    #[test]
+    fn counter_increments_are_reflected() {
+        let m = Metrics::new();
+        m.files_refined.store(5, Ordering::Relaxed);
+        m.query_errors.store(3, Ordering::Relaxed);
+        m.rows_ingested.store(1000, Ordering::Relaxed);
+        let out = m.to_prometheus();
+        assert!(out.contains("shinryu_files_refined_total 5"));
+        assert!(out.contains("shinryu_query_errors_total 3"));
+        assert!(out.contains("shinryu_rows_ingested_total 1000"));
+    }
+
+    #[test]
+    fn default_creates_same_as_new() {
+        let m1 = Metrics::new();
+        let m2 = Metrics::default();
+        assert_eq!(m1.to_prometheus(), m2.to_prometheus());
+    }
 }

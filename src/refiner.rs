@@ -213,3 +213,58 @@ fn file_is_stable(path: &Path, min_age: Duration) -> bool {
         .map(|t| t.elapsed().unwrap_or_default() >= min_age)
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_bronze_json_accepts_json_under_bronze() {
+        let bronze = PathBuf::from("/data/bronze");
+        assert!(is_bronze_json(Path::new("/data/bronze/signal_type=event/test.json"), &bronze));
+    }
+
+    #[test]
+    fn is_bronze_json_rejects_non_json() {
+        let bronze = PathBuf::from("/data/bronze");
+        assert!(!is_bronze_json(Path::new("/data/bronze/test.parquet"), &bronze));
+    }
+
+    #[test]
+    fn is_bronze_json_rejects_outside_bronze() {
+        let bronze = PathBuf::from("/data/bronze");
+        assert!(!is_bronze_json(Path::new("/data/silver/test.json"), &bronze));
+    }
+
+    #[test]
+    fn is_bronze_json_rejects_no_extension() {
+        let bronze = PathBuf::from("/data/bronze");
+        assert!(!is_bronze_json(Path::new("/data/bronze/noext"), &bronze));
+    }
+
+    #[test]
+    fn file_is_stable_nonexistent_returns_false() {
+        assert!(!file_is_stable(Path::new("/tmp/shinryu_nonexistent_xyz"), Duration::from_millis(0)));
+    }
+
+    #[test]
+    fn file_is_stable_old_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("test.json");
+        std::fs::write(&f, "{}").unwrap();
+
+        let past = std::time::SystemTime::now() - Duration::from_secs(10);
+        let ft = filetime::FileTime::from_system_time(past);
+        filetime::set_file_mtime(&f, ft).unwrap();
+
+        assert!(file_is_stable(&f, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn file_is_stable_new_file_with_high_threshold() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("fresh.json");
+        std::fs::write(&f, "{}").unwrap();
+        assert!(!file_is_stable(&f, Duration::from_secs(3600)));
+    }
+}

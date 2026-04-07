@@ -192,4 +192,48 @@ mod tests {
         assert!(tmp.path().join("silver").exists());
         assert!(tmp.path().join("gold").exists());
     }
+
+    #[test]
+    fn subscribe_returns_receiver() {
+        let tmp = TempDir::new().unwrap();
+        let watcher = DirectoryWatcher::new(tmp.path(), WatcherConfig {
+            poll_mode: true,
+            poll_interval: Duration::from_secs(60),
+            channel_capacity: 8,
+        }).unwrap();
+        let _rx1 = watcher.subscribe();
+        let _rx2 = watcher.subscribe();
+    }
+
+    #[test]
+    fn watcher_config_default_values() {
+        let config = WatcherConfig::default();
+        assert_eq!(config.poll_interval, Duration::from_secs(5));
+        assert_eq!(config.channel_capacity, 256);
+    }
+
+    #[tokio::test]
+    async fn watches_new_directory() {
+        let tmp = TempDir::new().unwrap();
+        let watcher = DirectoryWatcher::new(tmp.path(), WatcherConfig {
+            poll_mode: true,
+            poll_interval: Duration::from_millis(100),
+            channel_capacity: 16,
+        }).unwrap();
+
+        let mut rx = watcher.subscribe();
+
+        std::fs::create_dir_all(tmp.path().join("bronze").join("new_subdir")).unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
+        assert!(event.is_ok(), "should receive event for new directory");
+    }
+
+    #[test]
+    fn fs_event_debug_format() {
+        let event = FsEvent::NewFile(PathBuf::from("/test/file.json"));
+        let debug = format!("{:?}", event);
+        assert!(debug.contains("NewFile"));
+        assert!(debug.contains("file.json"));
+    }
 }

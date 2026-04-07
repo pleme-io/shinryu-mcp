@@ -146,16 +146,20 @@ mod tests {
     use http::Request;
     use tower::ServiceExt;
 
-    #[tokio::test]
-    async fn health_returns_ok() {
+    async fn test_app() -> (Router, Arc<Metrics>) {
         let tmp = tempfile::TempDir::new().unwrap();
         for tier in ["bronze", "silver", "gold"] {
             std::fs::create_dir_all(tmp.path().join(tier)).unwrap();
         }
         let session = Arc::new(ManagedSession::new(tmp.path()).await.unwrap());
         let metrics = Arc::new(Metrics::new());
-        let app = router(session, metrics);
+        let app = router(session, metrics.clone());
+        (app, metrics)
+    }
 
+    #[tokio::test]
+    async fn health_returns_ok() {
+        let (app, _) = test_app().await;
         let resp = app
             .oneshot(
                 Request::builder()
@@ -165,7 +169,84 @@ mod tests {
             )
             .await
             .unwrap();
-
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_returns_prometheus_text() {
+        let (app, metrics) = test_app().await;
+        metrics.files_refined.store(7, std::sync::atomic::Ordering::Relaxed);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("shinryu_files_refined_total 7"));
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_valid_sql() {
+        let (app, _) = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sql":"SELECT 1 as val"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["row_count"].as_u64().unwrap() >= 1);
+        assert!(json["elapsed_ms"].is_number());
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_invalid_sql_returns_400() {
+        let (app, metrics) = test_app().await;
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sql":"NOT VALID SQL AT ALL"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].is_string());
+        assert!(metrics.query_errors.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn query_endpoint_increments_queries_executed() {
+        let (app, metrics) = test_app().await;
+        let _ = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/query")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"sql":"SELECT 1"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(metrics.queries_executed.load(std::sync::atomic::Ordering::Relaxed) >= 1);
     }
 }

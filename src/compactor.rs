@@ -133,3 +133,105 @@ fn find_files_older_than(dir: &Path, extension: &str, max_age: Duration) -> anyh
     walk(dir, extension, now, max_age, &mut results);
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn age_file(path: &Path, age: Duration) {
+        let past = std::time::SystemTime::now() - age;
+        let filetime = filetime::FileTime::from_system_time(past);
+        filetime::set_file_mtime(path, filetime).unwrap();
+    }
+
+    #[test]
+    fn find_files_nonexistent_dir() {
+        let results = find_files_older_than(Path::new("/nonexistent_xyz"), ".json", Duration::from_secs(0)).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_files_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let results = find_files_older_than(tmp.path(), ".json", Duration::from_secs(0)).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_files_filters_by_extension() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.json"), "{}").unwrap();
+        fs::write(tmp.path().join("b.parquet"), "fake").unwrap();
+
+        age_file(&tmp.path().join("a.json"), Duration::from_secs(7200));
+        age_file(&tmp.path().join("b.parquet"), Duration::from_secs(7200));
+
+        let json_files = find_files_older_than(tmp.path(), ".json", Duration::from_secs(3600)).unwrap();
+        assert_eq!(json_files.len(), 1);
+        assert!(json_files[0].to_string_lossy().contains("a.json"));
+
+        let pq_files = find_files_older_than(tmp.path(), ".parquet", Duration::from_secs(3600)).unwrap();
+        assert_eq!(pq_files.len(), 1);
+    }
+
+    #[test]
+    fn find_files_respects_max_age() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let old_file = tmp.path().join("old.json");
+        let new_file = tmp.path().join("new.json");
+        fs::write(&old_file, "{}").unwrap();
+        fs::write(&new_file, "{}").unwrap();
+
+        age_file(&old_file, Duration::from_secs(7200));
+
+        let results = find_files_older_than(tmp.path(), ".json", Duration::from_secs(3600)).unwrap();
+        assert_eq!(results.len(), 1, "only old file should match");
+        assert_eq!(results[0], old_file);
+    }
+
+    #[test]
+    fn find_files_recursive_in_subdirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let subdir = tmp.path().join("sub1").join("sub2");
+        fs::create_dir_all(&subdir).unwrap();
+        let nested = subdir.join("deep.json");
+        fs::write(&nested, "{}").unwrap();
+
+        age_file(&nested, Duration::from_secs(7200));
+
+        let results = find_files_older_than(tmp.path(), ".json", Duration::from_secs(3600)).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn find_files_extension_with_or_without_dot() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let f = tmp.path().join("test.json");
+        fs::write(&f, "{}").unwrap();
+        age_file(&f, Duration::from_secs(7200));
+
+        let with_dot = find_files_older_than(tmp.path(), ".json", Duration::from_secs(3600)).unwrap();
+        let without_dot = find_files_older_than(tmp.path(), "json", Duration::from_secs(3600)).unwrap();
+        assert_eq!(with_dot.len(), without_dot.len(), "both formats should find the same files");
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_nonexistent_path_is_ok() {
+        let result = cleanup_expired("/tmp/shinryu_nonexistent_xyz", 30).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn compact_old_files_nonexistent_path_is_ok() {
+        let result = compact_old_files("/tmp/shinryu_nonexistent_xyz").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn compact_old_files_empty_dir_is_ok() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let result = compact_old_files(tmp.path().to_str().unwrap()).await;
+        assert!(result.is_ok());
+    }
+}

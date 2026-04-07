@@ -198,3 +198,92 @@ pub fn scaling_formulas_sql() -> String {
         ORDER BY pods_requested, gw
     "#.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn burst_summary_embeds_experiment_id() {
+        let sql = burst_summary_sql("exp-001");
+        assert!(sql.contains("experiment_id = 'exp-001'"));
+        assert!(sql.contains("GROUP BY scenario"));
+    }
+
+    #[test]
+    fn experiment_diff_embeds_both_ids() {
+        let sql = experiment_diff_sql("exp-a", "exp-b");
+        assert!(sql.contains("experiment_id = 'exp-a'"));
+        assert!(sql.contains("experiment_id = 'exp-b'"));
+        assert!(sql.contains("FULL OUTER JOIN"));
+    }
+
+    #[test]
+    fn bottleneck_rank_has_all_signal_categories() {
+        let sql = bottleneck_rank_sql("exp-001");
+        assert!(sql.contains("CPU_SATURATION"));
+        assert!(sql.contains("SUBPROCESS_KILLS"));
+        assert!(sql.contains("CONNECTIVITY_CYCLING"));
+        assert!(sql.contains("NETWORK_DROPS"));
+        assert!(sql.contains("POD_RESTARTS"));
+    }
+
+    #[test]
+    fn phase_breakdown_filters_phase_complete() {
+        let sql = phase_breakdown_sql("exp-001");
+        assert!(sql.contains("event_type = 'PHASE_COMPLETE'"));
+        assert!(sql.contains("experiment_id = 'exp-001'"));
+    }
+
+    #[test]
+    fn flow_summary_filters_signal_type_flow() {
+        let sql = flow_summary_sql("exp-001");
+        assert!(sql.contains("signal_type = 'flow'"));
+        assert!(sql.contains("LIMIT 50"));
+    }
+
+    #[test]
+    fn prediction_accuracy_checks_burst_complete() {
+        let sql = prediction_accuracy_sql("exp-001");
+        assert!(sql.contains("event_type = 'BURST_COMPLETE'"));
+        assert!(sql.contains("predicted_gw_replicas IS NOT NULL"));
+    }
+
+    #[test]
+    fn config_comparison_no_params() {
+        let sql = config_comparison_sql();
+        assert!(sql.contains("signal_type = 'experiment_result'"));
+        assert!(sql.contains("RANK()"));
+    }
+
+    #[test]
+    fn scaling_formulas_filters_high_rate() {
+        let sql = scaling_formulas_sql();
+        assert!(sql.contains("injection_rate >= 99.0"));
+        assert!(sql.contains("pods_per_gw"));
+    }
+
+    #[test]
+    fn special_chars_in_experiment_id_are_embedded_literally() {
+        let sql = burst_summary_sql("exp' OR 1=1; --");
+        assert!(
+            sql.contains("exp' OR 1=1; --"),
+            "IDs with special characters are embedded as-is (SQL injection risk is documented)"
+        );
+    }
+
+    #[test]
+    fn empty_experiment_id_produces_valid_sql_structure() {
+        let sql = burst_summary_sql("");
+        assert!(sql.contains("experiment_id = ''"));
+    }
+
+    #[test]
+    fn experiment_diff_column_aliases_use_ids() {
+        let sql = experiment_diff_sql("alpha", "beta");
+        assert!(sql.contains("\"alpha_rate\""));
+        assert!(sql.contains("\"beta_rate\""));
+        assert!(sql.contains("\"alpha_ms\""));
+        assert!(sql.contains("\"beta_ms\""));
+    }
+}

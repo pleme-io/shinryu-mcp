@@ -3048,6 +3048,7 @@ dependencies = [
  "chrono",
  "clap",
  "datafusion",
+ "filetime",
  "http",
  "http-body-util",
  "hyper",

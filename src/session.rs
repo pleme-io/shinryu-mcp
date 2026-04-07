@@ -104,36 +104,41 @@ async fn build_session(analytics_path: &Path) -> anyhow::Result<SessionContext> 
 
             let table_name = format!("events_{signal_type}");
 
-            // Register the entire signal_type partition as a listing table.
-            // DataFusion reads all Parquet files in the directory tree
-            // (YYYY-MM-DD/HH.parquet) as a single table. The first file's
-            // schema is used; subsequent files with compatible schemas are
-            // unioned automatically. This was previously register_parquet()
-            // on the single newest file, which threw away all historical
-            // experiment data.
-            let listing_opts = ListingOptions::new(Arc::new(
-                datafusion::datasource::file_format::parquet::ParquetFormat::default(),
-            ))
-            .with_file_extension(".parquet");
-            match ctx
-                .register_listing_table(
-                    &table_name,
-                    dir.to_string_lossy().as_ref(),
-                    listing_opts,
-                    None,
-                    None,
-                )
-                .await
-            {
-                Ok(()) => {
-                    info!(
-                        %signal_type, %table_name,
-                        file_count = parquet_files.len(),
-                        "Registered Silver partition (listing table)"
-                    );
-                    registered_tables.push(table_name);
-                }
-                Err(e) => warn!(error = %e, %signal_type, "Failed to register Silver partition"),
+            // Register ALL parquet files from this partition as one table.
+            //
+            // DataFusion's register_listing_table doesn't reliably recurse
+            // into our YYYY-MM-DD/HH.parquet subdirectory layout. Instead,
+            // read_parquet() with the explicit file list (which walkdir
+            // already discovered), materialize to memory (fine for our
+            // <100KB dataset), and register as a MemTable. This guarantees
+            // every historical experiment file is visible as one unified
+            // table, regardless of directory nesting depth.
+            let opts = ParquetReadOptions::default();
+            match ctx.read_parquet(parquet_files.clone(), opts).await {
+                Ok(df) => match df.collect().await {
+                    Ok(batches) if !batches.is_empty() => {
+                        let schema = batches[0].schema();
+                        match datafusion::datasource::MemTable::try_new(schema, vec![batches]) {
+                            Ok(mem_table) => {
+                                match ctx.register_table(&table_name, Arc::new(mem_table)) {
+                                    Ok(_) => {
+                                        info!(
+                                            %signal_type, %table_name,
+                                            file_count = parquet_files.len(),
+                                            "Registered Silver partition (multi-file MemTable)"
+                                        );
+                                        registered_tables.push(table_name);
+                                    }
+                                    Err(e) => warn!(error = %e, %signal_type, "Failed to register MemTable"),
+                                }
+                            }
+                            Err(e) => warn!(error = %e, %signal_type, "Failed to create MemTable"),
+                        }
+                    }
+                    Ok(_) => info!(%signal_type, "Silver partition has 0 rows, skipping"),
+                    Err(e) => warn!(error = %e, %signal_type, "Failed to collect Silver Parquet"),
+                },
+                Err(e) => warn!(error = %e, %signal_type, "Failed to read Silver Parquet files"),
             }
         }
 
@@ -290,6 +295,98 @@ mod tests {
             .unwrap()
             .value(0);
         assert_eq!(cnt, 2);
+    }
+
+    /// Regression test: multiple Parquet files across date-partitioned subdirectories
+    /// must ALL be queryable as one table, not just the latest file.
+    ///
+    /// This reproduces the bug where `register_parquet()` (single-file) was used
+    /// instead of `register_listing_table()` (directory), causing all historical
+    /// experiment data to be silently dropped.
+    #[tokio::test]
+    async fn reads_multi_file_silver_partitions() {
+        use arrow::array::{Int64Array, StringArray};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("bronze")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("gold")).unwrap();
+
+        // Create two date-partitioned Parquet files under signal_type=event
+        let event_dir = tmp.path().join("silver").join("signal_type=event");
+        let day1 = event_dir.join("2026-04-06");
+        let day2 = event_dir.join("2026-04-07");
+        std::fs::create_dir_all(&day1).unwrap();
+        std::fs::create_dir_all(&day2).unwrap();
+
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("experiment_id", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("event_type", arrow::datatypes::DataType::Utf8, true),
+            arrow::datatypes::Field::new("elapsed_ms", arrow::datatypes::DataType::Int64, true),
+        ]));
+
+        // File 1: 2 events from day 1
+        let batch1 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["exp-001", "exp-001"])),
+                Arc::new(StringArray::from(vec!["POLL_TICK", "MILESTONE"])),
+                Arc::new(Int64Array::from(vec![1000, 2000])),
+            ],
+        )
+        .unwrap();
+        let f1 = std::fs::File::create(day1.join("20.parquet")).unwrap();
+        let mut w1 = ArrowWriter::try_new(f1, Arc::clone(&schema), None).unwrap();
+        w1.write(&batch1).unwrap();
+        w1.close().unwrap();
+
+        // File 2: 3 events from day 2
+        let batch2 = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(StringArray::from(vec!["exp-002", "exp-002", "exp-002"])),
+                Arc::new(StringArray::from(vec!["POLL_TICK", "MILESTONE", "BURST_COMPLETE"])),
+                Arc::new(Int64Array::from(vec![3000, 4000, 5000])),
+            ],
+        )
+        .unwrap();
+        let f2 = std::fs::File::create(day2.join("01.parquet")).unwrap();
+        let mut w2 = ArrowWriter::try_new(f2, Arc::clone(&schema), None).unwrap();
+        w2.write(&batch2).unwrap();
+        w2.close().unwrap();
+
+        // Build session — should see ALL 5 events across both files
+        let session = ManagedSession::new(tmp.path()).await.unwrap();
+        let ctx = session.get();
+
+        let df = ctx
+            .sql("SELECT count(*) as cnt FROM events")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let cnt = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(cnt, 5, "should see all 5 events from both Parquet files, not just the latest");
+
+        // Verify both experiments are queryable (use count per experiment
+        // to avoid StringArray vs LargeStringArray type ambiguity)
+        let df = ctx
+            .sql("SELECT count(DISTINCT experiment_id) as exp_count FROM events")
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let exp_count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(exp_count, 2, "both experiments must be visible");
     }
 
     #[tokio::test]

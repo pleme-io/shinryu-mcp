@@ -104,17 +104,33 @@ async fn build_session(analytics_path: &Path) -> anyhow::Result<SessionContext> 
 
             let table_name = format!("events_{signal_type}");
 
-            // Use register_parquet on the most-recent file for this partition.
-            // (Multi-file unions across schemas would require a more complex setup.)
-            // Sort by name descending so the latest YYYY-MM-DD/HH file wins.
-            let mut sorted = parquet_files.clone();
-            sorted.sort();
-            let latest = sorted.last().unwrap();
-
-            let opts = datafusion::prelude::ParquetReadOptions::default();
-            match ctx.register_parquet(&table_name, latest, opts).await {
+            // Register the entire signal_type partition as a listing table.
+            // DataFusion reads all Parquet files in the directory tree
+            // (YYYY-MM-DD/HH.parquet) as a single table. The first file's
+            // schema is used; subsequent files with compatible schemas are
+            // unioned automatically. This was previously register_parquet()
+            // on the single newest file, which threw away all historical
+            // experiment data.
+            let listing_opts = ListingOptions::new(Arc::new(
+                datafusion::datasource::file_format::parquet::ParquetFormat::default(),
+            ))
+            .with_file_extension(".parquet");
+            match ctx
+                .register_listing_table(
+                    &table_name,
+                    dir.to_string_lossy().as_ref(),
+                    listing_opts,
+                    None,
+                    None,
+                )
+                .await
+            {
                 Ok(()) => {
-                    info!(%signal_type, %table_name, latest, "Registered Silver partition");
+                    info!(
+                        %signal_type, %table_name,
+                        file_count = parquet_files.len(),
+                        "Registered Silver partition (listing table)"
+                    );
                     registered_tables.push(table_name);
                 }
                 Err(e) => warn!(error = %e, %signal_type, "Failed to register Silver partition"),
